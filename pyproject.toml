@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+[project]
+name = "grype-scan-action"
+version = "0.0.0"
+description = "Scan SBOMs for vulnerabilities and summarise the findings"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = []
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_ignores = true
+
+[tool.basedpyright]
+# Standard mode keeps error-level type checking while avoiding the
+# strict-only warnings (reportAny, reportUnknownMemberType and friends)
+# that fire throughout on JSON parsed from an external tool, where the
+# shape is genuinely dynamic.
+typeCheckingMode = "standard"
+# The basedpyright pre-commit mirror bundles its own runtime and cannot
+# carry project dependencies; mypy performs the import-aware checking.
+reportMissingImports = false
+reportMissingModuleSource = false

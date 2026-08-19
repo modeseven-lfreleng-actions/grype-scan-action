@@ -1,41 +1,234 @@
 <!--
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: 2025 The Linux Foundation
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
 -->
 
-# 🛠️ Template Action
+# 🔎 Grype Scan Action
 
-<!-- prettier-ignore-start -->
-<!-- markdownlint-disable-next-line MD013 -->
-[![Linux Foundation](https://img.shields.io/badge/Linux-Foundation-blue)](https://linuxfoundation.org/) [![Source Code](https://img.shields.io/badge/GitHub-100000?logo=github&logoColor=white&color=blue)](https://github.com/lfreleng-actions/actions-template) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![pre-commit.ci status badge]][pre-commit.ci results page] [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/lfreleng-actions/actions-template/badge)](https://scorecard.dev/viewer/?uri=github.com/lfreleng-actions/actions-template)
-<!-- prettier-ignore-end -->
+Scans SBOMs, container images or directories for known vulnerabilities
+with [Grype](https://github.com/anchore/grype), renders the findings as
+a table in the job step summary, and decides whether they gate the
+workflow.
 
-This is a template for the other actions in this GitHub organisation.
+Replaces the Grype shell that each workflow family carried
+separately. A fix or an improvement now lands once.
 
-## actions-template
+## Why the summary matters
 
-## Usage Example
+A failing scan used to report a bare count, leaving the affected
+packages in the job log. This action puts the findings on the run
+page, sorted by severity then risk:
+
+## Grype Vulnerability Scan: alpine:3.10
+
+🔴 Critical: 8  🟠 High: 67  🟡 Medium: 42  🔵 Low: 4
+
+<!-- markdownlint-disable MD013 MD060 -->
+
+| Severity    | Package      | Version   | Type | Vulnerability  | Fix       | EPSS   | Risk  |
+| ----------- | ------------ | --------- | ---- | -------------- | --------- | ------ | ----- |
+| 🔴 Critical | libcrypto1.1 | 1.1.1k-r0 | apk  | CVE-2021-3711  | unknown   | 87.82% | 77.5  |
+| 🔴 Critical | zlib         | 1.2.11-r1 | apk  | CVE-2022-37434 | -         | 17.85% | 16.78 |
+| 🔴 Critical | apk-tools    | 2.10.6-r0 | apk  | CVE-2021-36159 | 2.10.7-r0 | 2.64%  | 2.39  |
+
+<!-- markdownlint-enable MD013 MD060 -->
+
+EPSS is the probability of exploitation in the next 30 days; Risk is
+Grype's combined score. The **Fix** column distinguishes a finding you
+can act on (a version) from one you cannot (`not-fixed`, `unknown`).
+
+## Usage
+
+Scan an SBOM:
 
 <!-- markdownlint-disable MD046 -->
 
 ```yaml
-steps:
-  - name: "Action template"
-    id: action-template
-    uses: lfreleng-actions/actions-template@main
-    with:
-      input: "placeholder"
+- uses: lfreleng-actions/grype-scan-action@v1
+  with:
+    sbom: "sbom-cyclonedx.json"
+    fail-on: "medium"
+```
+
+Scan a set of SBOMs, one report each, worst result deciding:
+
+```yaml
+- uses: lfreleng-actions/grype-scan-action@v1
+  with:
+    sbom: "sbom-cyclonedx-*.json"
+```
+
+Scan an image or directory directly:
+
+```yaml
+- uses: lfreleng-actions/grype-scan-action@v1
+  with:
+    target: "registry:alpine:3.20"
+    name: "base image"
 ```
 
 <!-- markdownlint-enable MD046 -->
+
+## Unblocking a pull request
+
+A published advisory with no available fix can block every pull request
+in a repository until upstream ships a patch. There are three ways out,
+in order of preference.
+
+### 1. Gate on what a bump can fix
+
+`only-fixed: "true"` reports every finding but gates those with a
+fix available. A CVE nobody can action stops blocking merges, while a
+missed dependency bump still fails.
+
+The action applies this itself rather than passing `--only-fixed` to
+Grype, which would drop unfixable findings from the report altogether.
+Measured against `alpine:3.10`: all 121 findings stay in the summary
+and the counts, while 1 fixable finding decides the verdict. Use
+`ignore-states` where filtering the report itself is what you want.
+
+### 2. Approve a bypass for one vulnerability
+
+Open an issue titled `BYPASS: CVE-2026-12345`, then have a maintainer
+apply the `cve-bypass` label. The action suppresses that vulnerability
+and records the suppression in the summary, linking the issue.
+
+The **label is the trust boundary**, not the issue author. Applying a
+label needs triage or write permission, so an outside contributor
+cannot approve their own bypass, while anyone may still request one.
+
+Authorship plays no part, by design. GitHub's `author_association`
+reports `CONTRIBUTOR` rather than `MEMBER` when organisation membership
+is private, and the value changes with the token used to read it. That
+makes it unsafe as an authorisation signal.
+
+This works where repository variables do not. Pull requests from forks
+and Dependabot runs get a read-only token and no Actions secrets,
+but reading labelled issues on a public repository needs neither.
+
+Point a group of repositories at one bypass list for organisation-wide
+suppression:
+
+<!-- markdownlint-disable MD046 -->
+
+```yaml
+- uses: lfreleng-actions/grype-scan-action@v1
+  with:
+    sbom: "sbom-cyclonedx.json"
+    bypass-repository: "lfreleng-actions/.github"
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+<!-- markdownlint-enable MD046 -->
+
+Bypasses expire. `bypass-max-age-days` (90 by default) makes the action
+ignore stale issues, which stops suppressions accumulating unnoticed.
+Close the issue to revoke one at once.
+
+A failed lookup, for any reason, applies no bypasses and leaves the
+gate closed.
+
+### 3. Report without gating
+
+`permit-fail: "true"` reports findings and passes regardless. Wire it
+to a repository variable to keep the existing escape hatch:
+
+<!-- markdownlint-disable MD046 -->
+
+```yaml
+permit-fail: ${{ vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
+```
+
+<!-- markdownlint-enable MD046 -->
+
+A composite action cannot read the `vars` context itself, so the caller
+passes the value.
+
+## Failing closed
+
+A pattern matching no SBOM fails the step by default. Scanning nothing
+looks identical to scanning something clean, so a mistyped path, or an
+earlier step that failed to produce its SBOM, would otherwise pass a
+security gate in silence. Set `fail-on-missing-sbom: "false"` where an
+absent SBOM is a valid outcome, such as a build permitted to fail.
+
+The same principle governs the bypass lookup: an API error applies no
+bypasses rather than assuming approval.
 
 ## Inputs
 
 <!-- markdownlint-disable MD013 -->
 
-| Name          | Required | Description  |
-| ------------- | -------- | ------------ |
-| input         | False    | Action input |
+### Scan target
+
+<!-- markdownlint-disable MD013 -->
+
+| Name                 | Default | Description                                                 |
+| -------------------- | ------- | ----------------------------------------------------------- |
+| sbom                 | ""      | Path or glob for SBOM file(s); the action scans every match |
+| fail-on-missing-sbom | true    | Fail when the pattern matches no file                       |
+| target               | ""      | Grype target reference, used instead of `sbom`              |
+| name                 | ""      | Label for this scan in the summary and annotations          |
+
+<!-- markdownlint-enable MD013 -->
+
+Provide one of `sbom` or `target`, not both.
+
+### Scan behaviour
+
+<!-- markdownlint-disable MD013 -->
+
+| Name             | Default | Description                                                |
+| ---------------- | ------- | ---------------------------------------------------------- |
+| fail-on          | medium  | Lowest gating severity, or `none` to report without gating |
+| only-fixed       | false   | Report vulnerabilities that have a fix                     |
+| ignore-states    | ""      | Fix states to ignore: fixed, not-fixed, unknown, wont-fix  |
+| by-cve           | false   | Orient results by CVE rather than the original ID          |
+| sort-by          | risk    | risk, severity, epss, kev, package or vulnerability        |
+| scope            | ""      | Layers to analyse for image targets                        |
+| platform         | ""      | Platform specifier for image targets                       |
+| distro           | ""      | Distro to match against                                    |
+| exclude          | ""      | Comma-separated globs to exclude                           |
+| add-cpes-if-none | false   | Generate CPEs for packages that have none                  |
+| vex              | ""      | Comma-separated VEX documents to apply                     |
+| config           | ""      | Grype configuration file                                   |
+| extra-args       | ""      | Raw arguments appended to the Grype call                   |
+| grype-version    | ""      | Grype version to install                                   |
+| cache-db         | true    | Cache the vulnerability database between runs              |
+
+<!-- markdownlint-enable MD013 -->
+
+### Reporting
+
+<!-- markdownlint-disable MD013 -->
+
+| Name               | Default                  | Description                                   |
+| ------------------ | ------------------------ | --------------------------------------------- |
+| output-formats     | json,table,sarif         | Formats to write; must include `json`         |
+| output-prefix      | grype-results            | Filename prefix for reports                   |
+| summary            | true                     | Write the findings table to the step summary  |
+| summary-title      | Grype Vulnerability Scan | Heading for the summary section               |
+| summary-max-rows   | 50                       | Row cap per artefact; the summary caps at 1MB |
+| summary-on-success | true                     | Write a summary when nothing gates            |
+| upload-artifact    | true                     | Upload reports as a workflow artefact         |
+| artifact-name      | grype-scan-results       | Artefact name                                 |
+| retention-days     | 90                       | Artefact retention                            |
+
+<!-- markdownlint-enable MD013 -->
+
+### Gating and bypasses
+
+<!-- markdownlint-disable MD013 -->
+
+| Name                | Default    | Description                                             |
+| ------------------- | ---------- | ------------------------------------------------------- |
+| permit-fail         | false      | Report findings and pass the step                       |
+| bypass-enabled      | true       | Honour maintainer-approved bypass issues                |
+| bypass-repository   | ""         | Repository holding bypass issues; empty uses the caller |
+| bypass-label        | cve-bypass | Label that makes a bypass effective                     |
+| bypass-title-prefix | BYPASS:    | Issue title prefix identifying a bypass                 |
+| bypass-max-age-days | 90         | Ignore bypass issues older than this; 0 disables expiry |
+| github-token        | ""         | Token for reading bypass issues                         |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -43,15 +236,27 @@ steps:
 
 <!-- markdownlint-disable MD013 -->
 
-| Name          | Description   |
-| ------------- | ------------- |
-| output        | Action output |
+| Name             | Description                                       |
+| ---------------- | ------------------------------------------------- |
+| gating           | "true" when findings gate the workflow            |
+| total-matches    | Total matches across all scanned artefacts        |
+| gating-matches   | Matches at or above the threshold, after bypasses |
+| bypassed-matches | Matches suppressed by an approved bypass          |
+| bypassed-ids     | Comma-separated vulnerability IDs bypassed        |
+| severity-counts  | JSON object of counts by severity                 |
+| report-files     | Newline-separated list of report files written    |
 
 <!-- markdownlint-enable MD013 -->
 
-## Implementation Details
-
 ## Notes
 
-[pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/actions-template/main
-[pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/actions-template/main.svg
+The gate is computed from the JSON report rather than from Grype's
+`--fail-on` exit code, because bypasses have to be subtracted from the
+findings first. An exit code cannot express "these would gate, but a
+maintainer suppressed two of them". Deriving the table, the counts and
+the verdict from one source keeps them consistent.
+
+A Grype configuration file taken from a pull request head is
+attacker-controlled: a contributor can add ignore rules to their own
+branch. Prefer bypass issues, which live outside the branch under
+review. Trust `config` when it comes from the base repository.

@@ -1,53 +1,609 @@
 ---
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: 2025 The Linux Foundation
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-# actions-template
-name: "🛠️ Actions Template"
-description: "Description of action"
-# Any relevant notes/observations can go here
+# grype-scan-action
+#
+# Scans SBOMs (or a Grype target reference) for known vulnerabilities,
+# renders the findings as a table in the job step summary, and decides
+# whether the findings gate the workflow.
+#
+# Gating is computed from the report rather than delegated to Grype's
+# --fail-on exit code, because the action also applies bypasses, and an
+# exit code cannot express "these findings would gate, but a maintainer
+# has suppressed two of them". Computing it here keeps the counts, the
+# table and the verdict consistent with one another.
+name: "🔎 Grype Vulnerability Scan"
+description: >
+  Scan SBOMs or an image/directory for vulnerabilities, summarise the
+  findings as a table, and gate the workflow with maintainer-controlled
+  bypasses.
 
 inputs:
-  input:
-    description: "Description of input"
-    required: true
+  # --- what to scan (exactly one of sbom / target) ---------------
+  sbom:
+    description: >
+      Path or shell glob matching the SBOM file(s) to scan, for example
+      'sbom-cyclonedx.json' or 'sbom-cyclonedx-*.json'. Every match is
+      scanned and the worst outcome decides the verdict.
+    required: false
+    default: ""
+  target:
+    description: >
+      Grype target reference to scan instead of an SBOM, for example
+      'registry:alpine:3.20', 'dir:.' or 'docker-archive:image.tar'.
+    required: false
+    default: ""
+  name:
+    description: >
+      Label for this scan in the summary and annotations, for example a
+      component or image name. Defaults to the SBOM or target name.
+    required: false
+    default: ""
+
+  # --- scan behaviour --------------------------------------------
+  fail-on-missing-sbom:
+    description: >
+      Fail when the sbom pattern matches no file. A security gate that
+      passes because a path was mistyped, or because the step producing
+      the SBOM failed, is worse than one that fails loudly. Set false
+      where producing no SBOM is a valid outcome, such as a build
+      permitted to fail.
+    required: false
+    default: "true"
+  fail-on:
+    description: >
+      Lowest severity that gates the workflow: negligible, low, medium,
+      high or critical. Set to 'none' to report without gating.
+    required: false
+    default: "medium"
+  only-fixed:
+    description: >
+      Report only vulnerabilities that have a fix available. Useful
+      where an unfixable advisory would otherwise block every pull
+      request until upstream ships a patch.
+    required: false
+    default: "false"
+  ignore-states:
+    description: >
+      Comma-separated fix states to ignore, from: fixed, not-fixed,
+      unknown, wont-fix. Finer-grained alternative to only-fixed.
+    required: false
+    default: ""
+  by-cve:
+    description: "Orient results by CVE rather than the original ID"
+    required: false
+    default: "false"
+  sort-by:
+    description: >
+      Result ordering: risk, severity, epss, kev, package or
+      vulnerability.
+    required: false
+    default: "risk"
+  scope:
+    description: "Layers to analyse: squashed, all-layers, deep-squashed"
+    required: false
+    default: ""
+  platform:
+    description: "Platform specifier for container image targets"
+    required: false
+    default: ""
+  distro:
+    description: "Distro to match against, as <distro>[-:@]<version>"
+    required: false
+    default: ""
+  exclude:
+    description: "Comma-separated glob expressions to exclude"
+    required: false
+    default: ""
+  add-cpes-if-none:
+    description: "Generate CPEs for packages that have none"
+    required: false
+    default: "false"
+  vex:
+    description: >
+      Comma-separated VEX documents to apply. The standards-based way
+      to record 'not affected' decisions alongside the code.
+    required: false
+    default: ""
+  config:
+    description: >
+      Grype configuration file to use. Treat as untrusted when it comes
+      from a pull request head; prefer bypass issues for suppression.
+    required: false
+    default: ""
+  extra-args:
+    description: "Additional raw arguments appended to the Grype call"
+    required: false
+    default: ""
+  grype-version:
+    description: "Grype version to install; empty uses the installer default"
+    required: false
+    default: ""
+  cache-db:
+    description: "Cache the Grype vulnerability database between runs"
+    required: false
+    default: "true"
+
+  # --- reporting --------------------------------------------------
+  output-formats:
+    description: "Comma-separated Grype output formats to write"
+    required: false
+    default: "json,table,sarif"
+  output-prefix:
+    description: "Filename prefix for report files"
+    required: false
+    default: "grype-results"
+  summary:
+    description: "Write a findings table to the job step summary"
+    required: false
+    default: "true"
+  summary-title:
+    description: "Heading used for the step summary section"
+    required: false
+    default: "Grype Vulnerability Scan"
+  summary-max-rows:
+    description: >
+      Maximum table rows per scanned artefact. The step summary has a
+      1MB limit, so large result sets truncate with a note pointing at
+      the uploaded report.
+    required: false
+    default: "50"
+  summary-on-success:
+    description: >
+      Write the summary even when nothing gates. Set false to keep the
+      run page quiet unless there is something to act on.
+    required: false
+    default: "true"
+  upload-artifact:
+    description: "Upload the report files as a workflow artefact"
+    required: false
+    default: "true"
+  artifact-name:
+    description: "Name for the uploaded artefact"
+    required: false
+    default: "grype-scan-results"
+  retention-days:
+    description: "Retention for the uploaded artefact"
+    required: false
+    default: "90"
+
+  # --- gating and bypasses ----------------------------------------
+  permit-fail:
+    description: >
+      Report findings and pass the step. A composite action cannot read
+      the vars context, so the calling workflow evaluates its own
+      repository variable and passes the result here. The README shows
+      the expression.
+    required: false
+    default: "false"
+  bypass-enabled:
+    description: >
+      Honour maintainer-approved bypasses recorded as labelled issues.
+    required: false
+    default: "true"
+  bypass-repository:
+    description: >
+      Repository holding bypass issues, as owner/name. Empty uses the
+      repository running the workflow. Point several repositories at a
+      shared one for an organisation-wide bypass list.
+    required: false
+    default: ""
+  bypass-label:
+    description: >
+      Label that makes a bypass issue effective. The label is the trust
+      boundary: applying one needs triage or write permission, so an
+      outside contributor cannot approve their own bypass. Authorship
+      is NOT used, because author_association reports CONTRIBUTOR
+      rather than MEMBER when organisation membership is private.
+    required: false
+    default: "cve-bypass"
+  bypass-title-prefix:
+    description: "Issue title prefix identifying a bypass request"
+    required: false
+    default: "BYPASS:"
+  bypass-max-age-days:
+    description: >
+      Ignore bypass issues older than this many days, so suppressions
+      expire rather than accumulate. 0 disables expiry.
+    required: false
+    default: "90"
+  github-token:
+    description: >
+      Token used to read bypass issues. The read-only token available
+      to pull requests from forks is sufficient for a public
+      repository. Without it the action falls back to unauthenticated
+      reads, which are rate limited.
+    required: false
+    default: ""
 
 outputs:
-  output:
-    description: "Description of output"
-    value: ${{ steps.code.outputs.output }}
+  gating:
+    description: "'true' when findings gate the workflow"
+    value: ${{ steps.evaluate.outputs.gating }}
+  total-matches:
+    description: "Total matches reported across all scanned artefacts"
+    value: ${{ steps.evaluate.outputs.total-matches }}
+  gating-matches:
+    description: "Matches at or above the threshold, after bypasses"
+    value: ${{ steps.evaluate.outputs.gating-matches }}
+  bypassed-matches:
+    description: "Matches suppressed by an approved bypass"
+    value: ${{ steps.evaluate.outputs.bypassed-matches }}
+  bypassed-ids:
+    description: "Comma-separated vulnerability IDs that were bypassed"
+    value: ${{ steps.evaluate.outputs.bypassed-ids }}
+  severity-counts:
+    description: "JSON object of match counts by severity"
+    value: ${{ steps.evaluate.outputs.severity-counts }}
+  report-files:
+    description: "Newline-separated list of report files written"
+    value: ${{ steps.evaluate.outputs.report-files }}
 
 runs:
   using: "composite"
   steps:
-    - name: "Friendly Name"
-      id: code
+    - name: "Validate inputs"
+      id: validate
       shell: bash
       env:
-        INPUT_VALUE: ${{ inputs.input }}
+        INPUT_SBOM: ${{ inputs.sbom }}
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_SORT_BY: ${{ inputs.sort-by }}
+        INPUT_FORMATS: ${{ inputs.output-formats }}
+        INPUT_PREFIX: ${{ inputs.output-prefix }}
+        INPUT_MAX_ROWS: ${{ inputs.summary-max-rows }}
+        INPUT_MAX_AGE: ${{ inputs.bypass-max-age-days }}
+        INPUT_RETENTION: ${{ inputs.retention-days }}
+        INPUT_BYPASS_REPO: ${{ inputs.bypass-repository }}
       run: |
-        # Friendly Name
-        input="$INPUT_VALUE"
-        if [ -z "$input" ]; then
-          echo "Error: mandatory input was not set/configured ❌"
+        # Reject contradictory or malformed inputs before installing
+        # anything, so a misconfiguration fails in seconds.
+        set -euo pipefail
+
+        if [ -z "${INPUT_SBOM}" ] && [ -z "${INPUT_TARGET}" ]; then
+          echo "::error::provide either 'sbom' or 'target'"
+          exit 1
+        fi
+        if [ -n "${INPUT_SBOM}" ] && [ -n "${INPUT_TARGET}" ]; then
+          echo "::error::'sbom' and 'target' are mutually exclusive"
           exit 1
         fi
 
-        # Write the output using the multiline heredoc format with a random
-        # delimiter so that an input containing newlines cannot inject
-        # additional keys into $GITHUB_OUTPUT (output-file injection). The
-        # delimiter is built from shell-builtin randomness (no external
-        # tools such as openssl/uuidgen, which are not guaranteed on
-        # self-hosted runners) and regenerated until it is provably absent
-        # from the value being emitted.
+        case "${INPUT_FAIL_ON}" in
+          negligible|low|medium|high|critical|none) ;;
+          *)
+            echo "::error::fail-on must be one of negligible, low," \
+              "medium, high, critical, none; got '${INPUT_FAIL_ON}'"
+            exit 1
+            ;;
+        esac
+
+        case "${INPUT_SORT_BY}" in
+          package|severity|epss|risk|kev|vulnerability) ;;
+          *)
+            echo "::error::sort-by must be one of package, severity," \
+              "epss, risk, kev, vulnerability; got '${INPUT_SORT_BY}'"
+            exit 1
+            ;;
+        esac
+
+        # 'json' underpins the summary, the gating decision and the
+        # bypass filtering, so it is not optional. Strip whitespace
+        # first: 'table, json' is as valid as 'json,table'.
+        normalised_formats="${INPUT_FORMATS// /}"
+        case ",${normalised_formats}," in
+          *,json,*) ;;
+          *)
+            echo "::error::output-formats must include 'json';" \
+              "got '${INPUT_FORMATS}'"
+            exit 1
+            ;;
+        esac
+
+        # The prefix becomes a filename and an artefact path.
+        if [[ ! "${INPUT_PREFIX}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+          echo "::error::output-prefix must match [A-Za-z0-9._-]+;" \
+            "got '${INPUT_PREFIX}'"
+          exit 1
+        fi
+
+        for pair in \
+          "summary-max-rows:${INPUT_MAX_ROWS}" \
+          "bypass-max-age-days:${INPUT_MAX_AGE}" \
+          "retention-days:${INPUT_RETENTION}"
+        do
+          num_name="${pair%%:*}"
+          num_value="${pair#*:}"
+          if [[ ! "${num_value}" =~ ^[0-9]+$ ]]; then
+            echo "::error::${num_name} must be a whole number;" \
+              "got '${num_value}'"
+            exit 1
+          fi
+        done
+
+        if [ -n "${INPUT_BYPASS_REPO}" ] && \
+           [[ ! "${INPUT_BYPASS_REPO}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]
+        then
+          echo "::error::bypass-repository must be 'owner/name';" \
+            "got '${INPUT_BYPASS_REPO}'"
+          exit 1
+        fi
+
+        echo "Inputs validated ✅"
+
+    - name: "Install Grype"
+      id: grype
+      # yamllint disable-line rule:line-length
+      uses: anchore/scan-action/download-grype@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
+      with:
+        grype-version: ${{ inputs.grype-version }}
+        cache-db: ${{ inputs.cache-db }}
+
+    - name: "Run Grype"
+      id: scan
+      shell: bash
+      env:
+        GRYPE_CMD: ${{ steps.grype.outputs.cmd }}
+        # Grype checks for a newer release on every invocation, which
+        # reaches toolbox-data.anchore.io. The version is pinned by the
+        # installer, so the call adds egress surface and a failure mode
+        # without changing what runs.
+        GRYPE_CHECK_FOR_APP_UPDATE: "false"
+        INPUT_SBOM: ${{ inputs.sbom }}
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_FAIL_ON_MISSING: ${{ inputs.fail-on-missing-sbom }}
+        INPUT_PREFIX: ${{ inputs.output-prefix }}
+        INPUT_FORMATS: ${{ inputs.output-formats }}
+        INPUT_ONLY_FIXED: ${{ inputs.only-fixed }}
+        INPUT_IGNORE_STATES: ${{ inputs.ignore-states }}
+        INPUT_BY_CVE: ${{ inputs.by-cve }}
+        INPUT_SORT_BY: ${{ inputs.sort-by }}
+        INPUT_SCOPE: ${{ inputs.scope }}
+        INPUT_PLATFORM: ${{ inputs.platform }}
+        INPUT_DISTRO: ${{ inputs.distro }}
+        INPUT_EXCLUDE: ${{ inputs.exclude }}
+        INPUT_ADD_CPES: ${{ inputs.add-cpes-if-none }}
+        INPUT_VEX: ${{ inputs.vex }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_EXTRA_ARGS: ${{ inputs.extra-args }}
+      run: |
+        # Scan each artefact, writing one report set per artefact.
+        # --fail-on is deliberately not passed: the gate is computed
+        # from the JSON in the evaluate step, which also applies
+        # bypasses. Grype's exit code is still checked so a genuine
+        # tool failure (as opposed to "found vulnerabilities") stops
+        # the run.
+        set -uo pipefail
+
+        # only-fixed is deliberately NOT passed to Grype: that would
+        # drop unfixable findings from the report, and they still need
+        # reporting. The evaluate step applies it to the gating subset
+        # instead, so the summary shows everything while the verdict
+        # rests on what a dependency bump can actually clear.
+        args=()
+        [ "${INPUT_BY_CVE}" = "true" ] && args+=(--by-cve)
+        [ "${INPUT_ADD_CPES}" = "true" ] && args+=(--add-cpes-if-none)
+        [ -n "${INPUT_IGNORE_STATES}" ] &&
+          args+=(--ignore-states "${INPUT_IGNORE_STATES}")
+        [ -n "${INPUT_SORT_BY}" ] &&
+          args+=(--sort-by "${INPUT_SORT_BY}")
+        [ -n "${INPUT_SCOPE}" ] && args+=(--scope "${INPUT_SCOPE}")
+        [ -n "${INPUT_PLATFORM}" ] &&
+          args+=(--platform "${INPUT_PLATFORM}")
+        [ -n "${INPUT_DISTRO}" ] && args+=(--distro "${INPUT_DISTRO}")
+        [ -n "${INPUT_CONFIG}" ] && args+=(--config "${INPUT_CONFIG}")
+        if [ -n "${INPUT_EXCLUDE}" ]; then
+          IFS=',' read -ra excludes <<< "${INPUT_EXCLUDE}"
+          for item in "${excludes[@]}"; do
+            [ -n "${item}" ] && args+=(--exclude "${item}")
+          done
+        fi
+        if [ -n "${INPUT_VEX}" ]; then
+          IFS=',' read -ra vexes <<< "${INPUT_VEX}"
+          for item in "${vexes[@]}"; do
+            [ -n "${item}" ] && args+=(--vex "${item}")
+          done
+        fi
+        if [ -n "${INPUT_EXTRA_ARGS}" ]; then
+          # Word-split deliberately: this is the escape hatch for
+          # flags the action does not model.
+          # shellcheck disable=SC2206
+          extra=(${INPUT_EXTRA_ARGS})
+          args+=("${extra[@]}")
+        fi
+
+        # Enumerate the artefacts to scan.
+        declare -a artefacts=()
+        if [ -n "${INPUT_TARGET}" ]; then
+          artefacts+=("${INPUT_TARGET}")
+        else
+          # Expand the pattern without word splitting, so a path
+          # containing spaces stays one pattern.
+          shopt -s nullglob
+          mapfile -t matches < <(
+            compgen -G "${INPUT_SBOM}" || true
+          )
+          shopt -u nullglob
+          if [ "${#matches[@]}" -eq 0 ]; then
+            echo "no-artefacts=true" >> "$GITHUB_OUTPUT"
+            if [ "${INPUT_FAIL_ON_MISSING}" = "true" ]; then
+              # Fail closed: scanning nothing is indistinguishable
+              # from scanning something clean, and a mistyped path or
+              # a failed SBOM step would otherwise pass the gate.
+              echo "::error::No SBOM matched '${INPUT_SBOM}'." \
+                "Set fail-on-missing-sbom: false where producing no" \
+                "SBOM is a valid outcome."
+              exit 1
+            fi
+            echo "::warning::No SBOM matched '${INPUT_SBOM}'"
+            exit 0
+          fi
+          for match in "${matches[@]}"; do
+            artefacts+=("sbom:${match}")
+          done
+        fi
+
+        IFS=',' read -ra formats <<< "${INPUT_FORMATS}"
+        index=0
+        manifest=""
+        for artefact in "${artefacts[@]}"; do
+          # Derive a stable, filename-safe slug per artefact so that
+          # scanning several SBOMs does not overwrite one report set.
+          raw="${artefact#sbom:}"
+          raw="$(basename "${raw}")"
+          slug="$(printf '%s' "${raw}" | tr -c 'A-Za-z0-9._-' '_')"
+          if [ "${#artefacts[@]}" -eq 1 ]; then
+            base="${INPUT_PREFIX}"
+          else
+            # The index keeps the name unique: two SBOMs in different
+            # directories can share a basename, and distinct names can
+            # sanitise to the same slug. Without it the second scan
+            # overwrites the first and the manifest points both
+            # artefacts at one report.
+            base="${INPUT_PREFIX}-${index}-${slug}"
+          fi
+
+          out_args=()
+          for fmt in "${formats[@]}"; do
+            fmt="${fmt// /}"
+            [ -z "${fmt}" ] && continue
+            case "${fmt}" in
+              json) out_args+=(-o "json=${base}.json") ;;
+              table) out_args+=(-o "table=${base}.txt") ;;
+              sarif) out_args+=(-o "sarif=${base}.sarif") ;;
+              cyclonedx) out_args+=(-o "cyclonedx=${base}.cdx.xml") ;;
+              cyclonedx-json)
+                out_args+=(-o "cyclonedx-json=${base}.cdx.json") ;;
+              *)
+                echo "::error::Unsupported output format '${fmt}'"
+                exit 1
+                ;;
+            esac
+          done
+
+          echo "::group::Grype ${artefact}"
+          "${GRYPE_CMD}" "${args[@]}" "${out_args[@]}" "${artefact}"
+          grype_exit=$?
+          if [ -f "${base}.txt" ]; then
+            cat "${base}.txt"
+          fi
+          echo "::endgroup::"
+
+          # Without --fail-on, Grype exits 0 on success. Anything else
+          # is a tool failure and must surface.
+          if [ "${grype_exit}" != "0" ]; then
+            echo "::error::Grype exited with code ${grype_exit} for" \
+              "${artefact}"
+            exit "${grype_exit}"
+          fi
+
+          manifest="${manifest}${base}.json|${artefact}"$'\n'
+          index=$((index + 1))
+        done
+
         delimiter="ghadelim_${RANDOM}${RANDOM}${RANDOM}${RANDOM}"
-        while [[ "$input" == *"$delimiter"* ]]; do
+        while [[ "${manifest}" == *"${delimiter}"* ]]; do
           delimiter="ghadelim_${RANDOM}${RANDOM}${RANDOM}${RANDOM}"
         done
         {
-          printf '%s<<%s\n' 'output' "$delimiter"
-          printf '%s\n' "$input"
-          printf '%s\n' "$delimiter"
+          printf '%s<<%s\n' 'manifest' "${delimiter}"
+          printf '%s\n' "${manifest}"
+          printf '%s\n' "${delimiter}"
         } >> "$GITHUB_OUTPUT"
-        echo "Action received: $input ✅"
-        echo "Action received: $input ✅" >> "$GITHUB_STEP_SUMMARY"
+        echo "no-artefacts=false" >> "$GITHUB_OUTPUT"
+
+    - name: "Collect approved bypasses"
+      id: bypasses
+      # yamllint disable-line rule:line-length
+      if: ${{ inputs.bypass-enabled == 'true' && steps.scan.outputs.no-artefacts != 'true' }}
+      shell: bash
+      env:
+        BYPASS_REPO: ${{ inputs.bypass-repository || github.repository }}
+        BYPASS_LABEL: ${{ inputs.bypass-label }}
+        BYPASS_PREFIX: ${{ inputs.bypass-title-prefix }}
+        BYPASS_MAX_AGE: ${{ inputs.bypass-max-age-days }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        API_URL: ${{ github.api_url }}
+      run: |
+        # Read maintainer-approved bypasses from labelled issues.
+        #
+        # The LABEL is the trust boundary, not the issue author:
+        # applying a label needs triage or write permission, whereas
+        # anyone can open an issue. Authorship would be unreliable in
+        # any case, because author_association reports CONTRIBUTOR
+        # rather than MEMBER when organisation membership is private,
+        # and the value varies with the token used to read it.
+        #
+        # Lookup failures leave the bypass list empty, so a broken or
+        # rate-limited API keeps the gate closed rather than opening
+        # it silently.
+        set -uo pipefail
+        PYTHONPATH="${GITHUB_ACTION_PATH}" python3 -m scripts.collect_bypasses
+
+    - name: "Evaluate findings"
+      id: evaluate
+      if: ${{ always() && steps.scan.outputs.no-artefacts != 'true' }}
+      shell: bash
+      env:
+        MANIFEST: ${{ steps.scan.outputs.manifest }}
+        BYPASSES: ${{ steps.bypasses.outputs.bypasses }}
+        INPUT_NAME: ${{ inputs.name }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_SUMMARY: ${{ inputs.summary }}
+        INPUT_SUMMARY_TITLE: ${{ inputs.summary-title }}
+        INPUT_SUMMARY_MAX_ROWS: ${{ inputs.summary-max-rows }}
+        INPUT_SUMMARY_ON_SUCCESS: ${{ inputs.summary-on-success }}
+        INPUT_ONLY_FIXED: ${{ inputs.only-fixed }}
+        BYPASS_REPO: ${{ inputs.bypass-repository || github.repository }}
+      run: |
+        # Turn the JSON report(s) into a table, counts and a verdict.
+        set -uo pipefail
+        PYTHONPATH="${GITHUB_ACTION_PATH}" python3 -m scripts.evaluate
+
+    - name: "Upload reports"
+      # yamllint disable-line rule:line-length
+      if: ${{ always() && inputs.upload-artifact == 'true' && steps.scan.outputs.no-artefacts != 'true' }}
+      # yamllint disable-line rule:line-length
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ steps.evaluate.outputs.report-files }}
+        retention-days: ${{ inputs.retention-days }}
+        if-no-files-found: warn
+
+    - name: "Apply verdict"
+      if: ${{ always() && steps.scan.outputs.no-artefacts != 'true' }}
+      shell: bash
+      env:
+        GATING: ${{ steps.evaluate.outputs.gating }}
+        GATING_MATCHES: ${{ steps.evaluate.outputs.gating-matches }}
+        BYPASSED: ${{ steps.evaluate.outputs.bypassed-matches }}
+        PERMIT_FAIL: ${{ inputs.permit-fail }}
+        FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        # Fail the step last, so the summary and artefacts are already
+        # in place when the run goes red.
+        set -euo pipefail
+
+        if [ "${BYPASSED}" != "0" ]; then
+          echo "::notice::${BYPASSED} finding(s) suppressed by an" \
+            "approved bypass issue"
+        fi
+
+        if [ "${GATING}" != "true" ]; then
+          echo "No findings at or above '${FAIL_ON}' ✅"
+          exit 0
+        fi
+
+        if [ "${PERMIT_FAIL}" = "true" ]; then
+          echo "::warning::${GATING_MATCHES} finding(s) at or above" \
+            "'${FAIL_ON}', but permit-fail is set so the step passes"
+          exit 0
+        fi
+
+        echo "::error::${GATING_MATCHES} finding(s) at or above" \
+          "'${FAIL_ON}'. See the job summary for the affected" \
+          "packages and CVEs."
+        exit 1

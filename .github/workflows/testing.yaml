@@ -1,6 +1,6 @@
 ---
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: 2025 The Linux Foundation
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
 
 # Action test/validation workflow
 name: "Test GitHub Action 🧪"
@@ -20,71 +20,308 @@ concurrency:
 permissions: {}
 
 jobs:
-  ### Test the GitHub Action in this Repository ###
   tests:
     name: "Test local GitHub Action"
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    timeout-minutes: 10 # Increase this timeout value as needed
+      issues: read  # bypass lookup reads issues
+    timeout-minutes: 20
     steps:
-      # Load the egress allow-list out-of-band from the
-      # organisation's .github repository and publish it as
-      # $CONNECTION_ALLOW_LIST for the harden-runner step below.
+      # Load the egress allow-list out-of-band from the organisation's
+      # .github repository and publish it as $CONNECTION_ALLOW_LIST.
       # yamllint disable-line rule:line-length
       - uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
         with:
-          config: '@18d9c4446bea555d0783e850f6d295f844fe8f67'  # v0.1.1
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@4e6952177b00e11f15cdc7098fd68e38881c9c39'  # v0.14.0
 
-      # Harden the runner with the just-loaded allow-list.
+      # Block egress: this job runs the pull request's own copy of
+      # action.yaml, so audit mode would let a contributor exfiltrate
+      # the runner token by editing the composite action.
       - name: 'Harden runner (block)'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40  # v2.20.1
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
         with:
           egress-policy: 'block'
+          # index.docker.io resolves image descriptors for the
+          # registry: targets these tests scan. The shared list carries
+          # registry-1.docker.io and auth.docker.io but not this one;
+          # requested for the shared list in lfreleng-actions/.github.
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
+            index.docker.io:443
 
       - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      # Perform setup prior to running test(s)
-      - name: "Testing setup step"
-        shell: bash
-        run: |
-          # Testing setup step
-          echo "Testing setup step"
-          echo "Testing setup step/summary output" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: "Running local action: ${{ github.repository }}"
+      # --- a target with known, unfixable findings ----------------
+      # alpine:3.10 is long out of support, so it reliably reports
+      # high and critical findings, most without a fix. That makes it
+      # a stable fixture for both the gating and the only-fixed paths.
+      - name: "Scan a vulnerable image (reporting only)"
+        id: report_only
         uses: ./
         with:
-          input: "test input 💬"
+          target: "registry:alpine:3.10"
+          name: "alpine:3.10"
+          fail-on: "none"
+          artifact-name: "grype-report-only"
+          bypass-enabled: "false"
 
-      - name: "Validated local action: ${{ github.repository }}"
+      - name: "Validate reporting-only scan"
         shell: bash
         env:
-          REPO: ${{ github.repository }}
+          GATING: ${{ steps.report_only.outputs.gating }}
+          TOTAL: ${{ steps.report_only.outputs.total-matches }}
+          COUNTS: ${{ steps.report_only.outputs.severity-counts }}
         run: |
-          # Local action validation
-          echo "Validated local action: $REPO"
-          echo "Validation step summary output" >> "$GITHUB_STEP_SUMMARY"
+          # fail-on: none must report findings without gating
+          set -euo pipefail
+          echo "total=${TOTAL} counts=${COUNTS}"
+          if [ "${GATING}" != "false" ]; then
+            echo "Expected no gating with fail-on: none ❌"
+            exit 1
+          fi
+          if [ "${TOTAL}" -lt 1 ]; then
+            echo "Expected findings from an EOL image ❌"
+            exit 1
+          fi
+          echo "Reporting-only scan behaved correctly ✅"
 
-      # yamllint disable-line rule:line-length
-      - name: "Running local action: ${{ github.repository }} [Override Failure]"
+      # --- gating, with the failure permitted ---------------------
+      - name: "Scan with gating but permit failure"
+        id: permitted
         uses: ./
-        id: failure
-        continue-on-error: true
         with:
-          invalid_input: "Some garbage"
+          target: "registry:alpine:3.10"
+          name: "alpine:3.10 (permitted)"
+          fail-on: "high"
+          permit-fail: "true"
+          artifact-name: "grype-permitted"
+          bypass-enabled: "false"
 
-      # Failure testing is also important
-      - name: "Error if step above did NOT fail"
-        if: steps.failure.outcome == 'success'
+      - name: "Validate permitted failure"
+        shell: bash
+        env:
+          GATING: ${{ steps.permitted.outputs.gating }}
+          MATCHES: ${{ steps.permitted.outputs.gating-matches }}
+        run: |
+          # The step passes, but still reports that findings gate
+          set -euo pipefail
+          if [ "${GATING}" != "true" ]; then
+            echo "Expected gating findings at high ❌"
+            exit 1
+          fi
+          if [ "${MATCHES}" -lt 1 ]; then
+            echo "Expected at least one gating match ❌"
+            exit 1
+          fi
+          echo "permit-fail passed the step while reporting ✅"
+
+      # --- only-fixed narrows to actionable findings --------------
+      - name: "Scan with only-fixed"
+        id: only_fixed
+        uses: ./
+        with:
+          target: "registry:alpine:3.10"
+          name: "alpine:3.10 (only-fixed)"
+          fail-on: "high"
+          only-fixed: "true"
+          permit-fail: "true"
+          artifact-name: "grype-only-fixed"
+          bypass-enabled: "false"
+
+      - name: "Validate only-fixed narrows the gate, not the report"
+        shell: bash
+        env:
+          ALL_TOTAL: ${{ steps.permitted.outputs.total-matches }}
+          ALL_GATING: ${{ steps.permitted.outputs.gating-matches }}
+          FIXED_TOTAL: ${{ steps.only_fixed.outputs.total-matches }}
+          FIXED_GATING: ${{ steps.only_fixed.outputs.gating-matches }}
+        run: |
+          # only-fixed must keep reporting every finding while gating
+          # on those a dependency bump can clear
+          set -euo pipefail
+          echo "total: ${ALL_TOTAL} -> ${FIXED_TOTAL}"
+          echo "gating: ${ALL_GATING} -> ${FIXED_GATING}"
+          if [ "${FIXED_TOTAL}" != "${ALL_TOTAL}" ]; then
+            echo "only-fixed changed the reported total ❌"
+            exit 1
+          fi
+          if [ "${FIXED_GATING}" -ge "${ALL_GATING}" ]; then
+            echo "only-fixed did not narrow the gating set ❌"
+            exit 1
+          fi
+          echo "Reported ${FIXED_TOTAL}, gated ${FIXED_GATING} ✅"
+
+      # --- gating must fail the step by default -------------------
+      - name: "Scan that must fail"
+        id: must_fail
+        continue-on-error: true
+        uses: ./
+        with:
+          target: "registry:alpine:3.10"
+          fail-on: "high"
+          artifact-name: "grype-must-fail"
+          bypass-enabled: "false"
+          summary: "false"
+
+      - name: "Error if the gating scan did NOT fail"
+        if: steps.must_fail.outcome == 'success'
         shell: bash
         run: |
-          # Error if step above did NOT fail
-          echo "Error: previous test step did NOT fail ❌"
+          # Findings above the threshold must fail without permit-fail
+          echo "Error: gating scan passed unexpectedly ❌"
           exit 1
+
+      # --- input validation ---------------------------------------
+      - name: "Neither sbom nor target"
+        id: no_source
+        continue-on-error: true
+        uses: ./
+        with:
+          fail-on: "high"
+
+      - name: "Error if missing source did NOT fail"
+        if: steps.no_source.outcome == 'success'
+        shell: bash
+        run: |
+          # One of sbom or target is mandatory
+          echo "Error: missing source was accepted ❌"
+          exit 1
+
+      - name: "Both sbom and target"
+        id: both_sources
+        continue-on-error: true
+        uses: ./
+        with:
+          sbom: "sbom.json"
+          target: "registry:alpine:3.10"
+
+      - name: "Error if conflicting sources did NOT fail"
+        if: steps.both_sources.outcome == 'success'
+        shell: bash
+        run: |
+          # sbom and target are mutually exclusive
+          echo "Error: conflicting sources were accepted ❌"
+          exit 1
+
+      - name: "Invalid fail-on"
+        id: bad_threshold
+        continue-on-error: true
+        uses: ./
+        with:
+          target: "registry:alpine:3.10"
+          fail-on: "catastrophic"
+
+      - name: "Error if invalid fail-on did NOT fail"
+        if: steps.bad_threshold.outcome == 'success'
+        shell: bash
+        run: |
+          # Severity thresholds are a closed set
+          echo "Error: invalid fail-on was accepted ❌"
+          exit 1
+
+      - name: "Output formats without json"
+        id: no_json
+        continue-on-error: true
+        uses: ./
+        with:
+          target: "registry:alpine:3.10"
+          output-formats: "table,sarif"
+
+      - name: "Error if json-less formats did NOT fail"
+        if: steps.no_json.outcome == 'success'
+        shell: bash
+        run: |
+          # The summary and gate both read the JSON report
+          echo "Error: output-formats without json was accepted ❌"
+          exit 1
+
+      # --- missing SBOM is a warning, not a crash -----------------
+      - name: "SBOM glob matching nothing"
+        id: no_sbom
+        continue-on-error: true
+        uses: ./
+        with:
+          sbom: "does-not-exist-*.json"
+          upload-artifact: "false"
+
+      - name: "Error if a missing SBOM did NOT fail"
+        if: steps.no_sbom.outcome == 'success'
+        shell: bash
+        run: |
+          # Scanning nothing must not pass a security gate
+          echo "Error: a missing SBOM passed the gate ❌"
+          exit 1
+
+      - name: "SBOM glob matching nothing, permitted"
+        id: no_sbom_ok
+        uses: ./
+        with:
+          sbom: "does-not-exist-*.json"
+          fail-on-missing-sbom: "false"
+          upload-artifact: "false"
+
+      - name: "Validate the opt-out warns without failing"
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.no_sbom_ok.outcome }}
+        run: |
+          # With the opt-out, absence is a valid outcome
+          set -euo pipefail
+          if [ "${OUTCOME}" != "success" ]; then
+            echo "Expected the opt-out to pass ❌"
+            exit 1
+          fi
+          echo "Missing SBOM permitted when opted in ✅"
+
+  ### Unit tests for the report evaluation ###
+  unit:
+    name: "Evaluate script unit tests"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # Load the egress allow-list out-of-band from the organisation's
+      # .github repository and publish it as $CONNECTION_ALLOW_LIST.
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@4e6952177b00e11f15cdc7098fd68e38881c9c39'  # v0.14.0
+
+      # Block egress: this job runs the pull request's own copy of
+      # action.yaml, so audit mode would let a contributor exfiltrate
+      # the runner token by editing the composite action.
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+        with:
+          egress-policy: 'block'
+          # index.docker.io resolves image descriptors for the
+          # registry: targets these tests scan. The shared list carries
+          # registry-1.docker.io and auth.docker.io but not this one;
+          # requested for the shared list in lfreleng-actions/.github.
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+            index.docker.io:443
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Run unit tests"
+        shell: bash
+        run: |
+          # Exercise gating, bypass and rendering logic offline
+          set -euo pipefail
+          python3 tests/test_evaluate.py
+          python3 tests/test_collect_bypasses.py
