@@ -71,6 +71,13 @@ repos:
     hooks:
       - id: write-good
         files: "\\.(rst|md|markdown|mdown|mkdn)$"
+        # The 'adverb' rule flags the word 'only', which appears here
+        # as Grype's own option name (only-fixed, only-notfixed) and in
+        # the input table describing it; the option cannot be renamed.
+        # 'passive' fires on phrases such as "the gate is computed",
+        # which reads better than the active rewrite. Every other rule
+        # stays on.
+        args: ["--no-adverb", "--no-passive"]
 
   - repo: https://github.com/shellcheck-py/shellcheck-py
     rev: 745eface02aef23e168a8afb6b5737818efbea95  # frozen: v0.11.0.1
