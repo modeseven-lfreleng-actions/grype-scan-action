@@ -193,9 +193,12 @@ inputs:
     description: >
       Label that makes a bypass issue effective. The label is the trust
       boundary: applying one needs triage or write permission, so an
-      outside contributor cannot approve their own bypass. Authorship
-      is NOT used, because author_association reports CONTRIBUTOR
-      rather than MEMBER when organisation membership is private.
+      outside contributor cannot approve their own bypass. Identifiers
+      come from the title as it stood when the label was last applied,
+      so editing the title afterwards changes nothing until a
+      maintainer re-applies the label. Authorship is NOT used, because
+      author_association reports CONTRIBUTOR rather than MEMBER when
+      organisation membership is private.
     required: false
     default: "cve-bypass"
   bypass-title-prefix:
@@ -535,6 +538,13 @@ runs:
         # any case, because author_association reports CONTRIBUTOR
         # rather than MEMBER when organisation membership is private,
         # and the value varies with the token used to read it.
+        #
+        # The label authorises the issue, but an author can edit their
+        # own title afterwards, so the identifiers are read from the
+        # revision current when the label went on, reconstructed from
+        # the issue's rename events. Those are paginated, so this costs
+        # at least one extra API call per candidate issue, and up to
+        # ten where its history is long.
         #
         # Lookup failures leave the bypass list empty, so a broken or
         # rate-limited API keeps the gate closed rather than opening

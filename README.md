@@ -97,6 +97,15 @@ The **label is the trust boundary**, not the issue author. Applying a
 label needs triage or write permission, so an outside contributor
 cannot approve their own bypass, while anyone may still request one.
 
+The label authorises a **revision**, not the issue. An author can edit
+their own title at any time, so an approved `BYPASS: CVE-2026-0001`
+could otherwise become a critical, unfixed CVE after review. The action
+reads identifiers from the title as it stood when the label last went
+on, reconstructed from the issue's rename events. Editing the title
+afterwards changes nothing; a maintainer re-applies the label to
+approve the new wording. Where that title cannot be established, the
+bypass does not apply.
+
 Authorship plays no part, by design. GitHub's `author_association`
 reports `CONTRIBUTOR` rather than `MEMBER` when organisation membership
 is private, and the value changes with the token used to read it. That
@@ -128,6 +137,11 @@ Close the issue to revoke one at once.
 A failed lookup, for any reason, applies no bypasses and leaves the
 gate closed.
 
+Checking the approved revision costs at least one extra API call per
+unexpired bypass issue, and up to ten where the issue has a long
+event history. Pass `github-token` where the list is long enough for
+unauthenticated rate limits to bite.
+
 ### 3. Report without gating
 
 `permit-fail: "true"` reports findings and passes regardless. Wire it
@@ -153,7 +167,8 @@ security gate in silence. Set `fail-on-missing-sbom: "false"` where an
 absent SBOM is a valid outcome, such as a build permitted to fail.
 
 The same principle governs the bypass lookup: an API error applies no
-bypasses rather than assuming approval.
+bypasses rather than assuming approval, and so does an issue whose
+approved title cannot be reconstructed.
 
 ## Inputs
 
