@@ -31,7 +31,7 @@ jobs:
       # Load the egress allow-list out-of-band from the organisation's
       # .github repository and publish it as $CONNECTION_ALLOW_LIST.
       # yamllint disable-line rule:line-length
-      - uses: lfreleng-actions/harden-runner-block-action@2a70c3284392b8d6ee85a509dd4e9818801a7e82  # v0.11.1
+      - uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a  # v0.12.1
         with:
           # yamllint disable-line rule:line-length
           config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@4e6952177b00e11f15cdc7098fd68e38881c9c39'  # v0.14.0
@@ -291,7 +291,7 @@ jobs:
       # Load the egress allow-list out-of-band from the organisation's
       # .github repository and publish it as $CONNECTION_ALLOW_LIST.
       # yamllint disable-line rule:line-length
-      - uses: lfreleng-actions/harden-runner-block-action@2a70c3284392b8d6ee85a509dd4e9818801a7e82  # v0.11.1
+      - uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a  # v0.12.1
         with:
           # yamllint disable-line rule:line-length
           config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@4e6952177b00e11f15cdc7098fd68e38881c9c39'  # v0.14.0
